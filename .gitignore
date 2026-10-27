@@ -1,0 +1,32 @@
+# Local WireGuard material and secrets. Testdata fixtures stay tracked.
+*.conf
+!internal/**/testdata/**
+!internal/**/testdata/**/*
+*.credentials
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Local review notes. Not part of the public repo.
+/private/
+
+# Build output
+/wg-supervisor
+/dist/
+*.exe
+coverage.out
+*.test
+
+# Editor and OS files
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store

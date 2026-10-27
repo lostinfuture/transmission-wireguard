@@ -1,0 +1,8 @@
+.git
+private
+*.conf
+*.credentials
+.env
+.env.*
+__pycache__/
+*.py[cod]
