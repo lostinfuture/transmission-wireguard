@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/lostinfuture/transmission-wireguard/internal/supervisor"
 )
 
 var (
@@ -14,10 +16,10 @@ var (
 )
 
 func main() {
-	os.Exit(run(os.Args[1:]))
+	os.Exit(run(os.Args[1:], os.Environ()))
 }
 
-func run(args []string) int {
+func run(args, env []string) int {
 	cmd := "run"
 	if len(args) > 0 {
 		cmd = args[0]
@@ -30,6 +32,12 @@ func run(args []string) int {
 		}
 		return 0
 	case "run":
+		cfg, err := supervisor.LoadFrom(env)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s\n", err.Error())
+			return 1
+		}
+		supervisor.NoteRustnet(cfg.Rustnet)
 		fmt.Fprintln(os.Stderr, "wireguard is not implemented")
 		return 1
 	default:

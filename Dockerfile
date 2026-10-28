@@ -21,6 +21,7 @@ ARG SUPERVISOR_VERSION
 WORKDIR /src
 COPY go.mod ./
 COPY cmd ./cmd
+COPY internal ./internal
 RUN apk add --no-cache go \
     && case "${TARGETARCH}" in \
          arm) export GOARM="${TARGETVARIANT#v}" ;; \
