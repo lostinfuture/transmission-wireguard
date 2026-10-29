@@ -18,6 +18,9 @@ ARG TRANSMISSIONIC_REVISION=d5825a48b188c0089c80acb62b57bb54e24e641b
 ARG WIREGUARD_GO_VERSION=0.0.20250522
 ARG WIREGUARD_GO_URL=https://git.zx2c4.com/wireguard-go/snapshot/wireguard-go-0.0.20250522.tar.xz
 ARG WIREGUARD_GO_SHA256=c7eeffb13e5eb43b93e54a21d78dd71414771af9e07112da5275690493695c9c
+# The snapshot pins x/net v0.39.0 and x/crypto v0.37.0. Trivy reports those as high.
+ARG X_NET_VERSION=v0.62.0
+ARG X_CRYPTO_VERSION=v0.58.0
 ARG RUSTNET_VERSION=1.7.0
 ARG RUSTNET_URL=https://github.com/domcyrus/rustnet/archive/refs/tags/v1.7.0.tar.gz
 ARG RUSTNET_SHA256=9d3f6509da06f832c04c5accc7b777c18f3de8b32c885137c9a1346990694dda
@@ -133,6 +136,7 @@ RUN apk add --no-cache ca-certificates wget unzip \
 FROM --platform=$BUILDPLATFORM alpine:${ALPINE_VERSION} AS wireguard-go
 ARG TARGETOS TARGETARCH TARGETVARIANT
 ARG WIREGUARD_GO_URL WIREGUARD_GO_SHA256
+ARG X_NET_VERSION X_CRYPTO_VERSION
 RUN apk add --no-cache ca-certificates wget xz go \
     && wget -O /tmp/wireguard-go.tar.xz "${WIREGUARD_GO_URL}" \
     && echo "${WIREGUARD_GO_SHA256}  /tmp/wireguard-go.tar.xz" | sha256sum -c \
@@ -143,9 +147,13 @@ RUN apk add --no-cache ca-certificates wget xz go \
     && case "${TARGETARCH}" in \
          arm) export GOARM="${TARGETVARIANT#v}" ;; \
        esac \
+    && GOTOOLCHAIN=local go get "golang.org/x/net@${X_NET_VERSION}" "golang.org/x/crypto@${X_CRYPTO_VERSION}" \
+    && GOTOOLCHAIN=local go mod tidy \
     && GOTOOLCHAIN=local CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
-         go build -trimpath -buildvcs=false -ldflags "-s -w" -o /out/wireguard-go . \
+         go build -mod=mod -trimpath -buildvcs=false -ldflags "-s -w" -o /out/wireguard-go . \
     && test -x /out/wireguard-go \
+    && go version -m /out/wireguard-go | grep -q "golang.org/x/net[[:space:]]${X_NET_VERSION}" \
+    && go version -m /out/wireguard-go | grep -q "golang.org/x/crypto[[:space:]]${X_CRYPTO_VERSION}" \
     && grep -q "Permission is hereby granted" /src/LICENSE \
     && cp /src/LICENSE /out/LICENSE
 
