@@ -191,6 +191,111 @@ func TestApplyUnlinksKeyFiles(t *testing.T) {
 	}
 }
 
+func TestProvokeSequence(t *testing.T) {
+	old := runCmd
+	t.Cleanup(func() { runCmd = old })
+	var got []string
+	runCmd = func(name string, args ...string) ([]byte, error) {
+		if name != "wg" {
+			t.Fatalf("command %s", name)
+		}
+		got = append(got, args[len(args)-1])
+		return nil, nil
+	}
+	pub := strings.Repeat("B", 43) + "="
+	if err := Provoke("wg0", pub, 0); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "1,0" {
+		t.Fatalf("configured 0: %v", got)
+	}
+	got = nil
+	if err := Provoke("wg0", pub, 1); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "1" {
+		t.Fatalf("configured 1: %v", got)
+	}
+	got = nil
+	if err := Provoke("wg0", pub, 25); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "1,25" {
+		t.Fatalf("configured 25: %v", got)
+	}
+}
+
+func TestRemovePeerMissing(t *testing.T) {
+	old := runCmd
+	t.Cleanup(func() { runCmd = old })
+	runCmd = func(name string, args ...string) ([]byte, error) {
+		if strings.Join(args, " ") != "set wg0 peer PUB remove" {
+			t.Fatal(args)
+		}
+		return []byte("Unable to find peer"), errors.New("exit")
+	}
+	if err := RemovePeer("wg0", "PUB"); err != nil {
+		t.Fatal(err)
+	}
+	runCmd = func(name string, args ...string) ([]byte, error) {
+		return []byte("permission denied"), errors.New("exit")
+	}
+	if err := RemovePeer("wg0", "PUB"); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestAddPeerArgvOmitsKeyAndKeepalive(t *testing.T) {
+	old := keyDir
+	keyDir = "/run/wg-supervisor"
+	t.Cleanup(func() { keyDir = old })
+	pub := strings.Repeat("B", 43) + "="
+	args := AddPeerArgv("wg0", pub, "203.0.113.10:51820", true, []string{"0.0.0.0/0"})
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "private-key") || strings.Contains(joined, "listen-port") || strings.Contains(joined, "persistent-keepalive") {
+		t.Fatal(joined)
+	}
+	if !strings.Contains(joined, "preshared-key /run/wg-supervisor/presharedkey") || !strings.Contains(joined, "allowed-ips 0.0.0.0/0") {
+		t.Fatal(joined)
+	}
+	joined = strings.Join(AddPeerArgv("wg0", pub, "203.0.113.10:51820", false, []string{"10.8.0.0/24"}), " ")
+	if strings.Contains(joined, "preshared-key") {
+		t.Fatal(joined)
+	}
+}
+
+func TestReaddPeerUnlinks(t *testing.T) {
+	dir := t.TempDir()
+	oldDir, oldRun := keyDir, runCmd
+	keyDir = dir
+	t.Cleanup(func() {
+		keyDir = oldDir
+		runCmd = oldRun
+	})
+	var joined string
+	runCmd = func(name string, args ...string) ([]byte, error) {
+		joined = strings.Join(args, " ")
+		if _, err := os.Stat(filepath.Join(dir, "presharedkey")); err != nil {
+			t.Fatal("psk missing during wg set")
+		}
+		return nil, nil
+	}
+	cfg := Config{
+		PublicKey:    strings.Repeat("B", 43) + "=",
+		PresharedKey: strings.Repeat("C", 43) + "=",
+		AllowedIPs:   []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")},
+	}
+	if err := ReaddPeer("wg0", cfg, "203.0.113.10:51820"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(joined, "private-key") || strings.Contains(joined, "persistent-keepalive") || strings.Contains(joined, "listen-port") {
+		t.Fatal(joined)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "presharedkey")); !os.IsNotExist(err) {
+		t.Fatal("psk remained")
+	}
+}
+
 func TestKeepaliveEdgeRestores(t *testing.T) {
 	var got []int
 	set := func(n int) error {

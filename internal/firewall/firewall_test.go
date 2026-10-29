@@ -62,6 +62,25 @@ func TestGoldenRules(t *testing.T) {
 	}
 }
 
+func TestResolverRuleShape(t *testing.T) {
+	rules := resolverRules("eth0", "192.0.2.1")
+	if len(rules) != 2 {
+		t.Fatal(len(rules))
+	}
+	udp := strings.Join(rules[0], " ")
+	tcp := strings.Join(rules[1], " ")
+	if udp != "-o eth0 -d 192.0.2.1 -p udp --dport 53 -j ACCEPT" {
+		t.Fatal(udp)
+	}
+	if tcp != "-o eth0 -d 192.0.2.1 -p tcp --dport 53 -j ACCEPT" {
+		t.Fatal(tcp)
+	}
+	fw := Firewall{ExtIf: "eth0"}
+	if err := fw.AllowResolver(netip.MustParseAddr("2001:db8::53")); err == nil || !strings.Contains(err.Error(), "ipv6 is disabled") {
+		t.Fatal(err)
+	}
+}
+
 func TestReplaceEndpointShape(t *testing.T) {
 	old := endpointOut("eth0", "203.0.113.10", 51820)
 	next := endpointOut("eth0", "203.0.113.11", 51820)

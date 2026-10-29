@@ -1,0 +1,10 @@
+# Opt-in userspace WireGuard for a host with no kernel module.
+# Compose this with docker-compose.yml. It does not add NET_RAW.
+#   docker compose -f docker-compose.yml -f examples/userspace.override.yml up -d
+# The kernel dataplane stays the default. There is no automatic fallback.
+services:
+  transmission-wireguard:
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      WG_IMPLEMENTATION: userspace

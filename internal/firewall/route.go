@@ -11,6 +11,7 @@ import (
 
 var defaultRouteRE = regexp.MustCompile(`default via (\S+) dev (\S+)`)
 var mtuRE = regexp.MustCompile(`\bmtu (\d+)\b`)
+var routeDevRE = regexp.MustCompile(`\bdev (\S+)`)
 
 // DefaultRoute parses `ip route show default`.
 func DefaultRoute(text string) (gw netip.Addr, dev string, err error) {
@@ -90,6 +91,15 @@ func OriginalInstalled(gw netip.Addr, dev string) bool {
 
 // ReplaceVia installs prefix via gw dev extif. A family mismatch is refused before ip runs.
 func ReplaceVia(prefix netip.Prefix, gw netip.Addr, extif string) error {
+	return routeVia("replace", prefix, gw, extif)
+}
+
+// DelHostVia deletes a host route this process installed. A default prefix is refused.
+func DelHostVia(prefix netip.Prefix, gw netip.Addr, extif string) error {
+	return routeVia("del", prefix, gw, extif)
+}
+
+func routeVia(verb string, prefix netip.Prefix, gw netip.Addr, extif string) error {
 	if err := validateIf(extif); err != nil {
 		return err
 	}
@@ -103,11 +113,39 @@ func ReplaceVia(prefix netip.Prefix, gw netip.Addr, extif string) error {
 	if gw.Is6() {
 		fam = "-6"
 	}
-	out, err := exec.Command("ip", fam, "route", "replace", prefix.String(), "via", gw.String(), "dev", extif).CombinedOutput()
+	out, err := exec.Command("ip", fam, "route", verb, prefix.String(), "via", gw.String(), "dev", extif).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("ip route replace %s: %w (%s)", prefix, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("ip route %s %s: %w (%s)", verb, prefix, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// ParseRouteGetDev reads the device from `ip route get`.
+func ParseRouteGetDev(text string) (string, error) {
+	m := routeDevRE.FindStringSubmatch(text)
+	if m == nil {
+		return "", fmt.Errorf("no device")
+	}
+	if err := validateIf(m[1]); err != nil {
+		return "", err
+	}
+	return m[1], nil
+}
+
+// RouteGet runs `ip route get` and returns the device that would carry the packet.
+func RouteGet(addr netip.Addr) (string, error) {
+	if !addr.IsValid() {
+		return "", fmt.Errorf("route address is required")
+	}
+	fam := "-4"
+	if addr.Is6() {
+		fam = "-6"
+	}
+	out, err := exec.Command("ip", fam, "route", "get", addr.String()).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("ip route get %s: %w (%s)", addr, err, strings.TrimSpace(string(out)))
+	}
+	return ParseRouteGetDev(string(out))
 }
 
 // ReplaceDev installs prefix dev wg. A default prefix becomes `default dev wg`.

@@ -263,6 +263,53 @@ func (f Firewall) HasWGAccept() bool {
 	return has(f.bin(), chain, "-o", f.WGDev, "-j", "ACCEPT")
 }
 
+// resolverRules are the temporary udp/53 and tcp/53 accepts for one destination.
+// insertOnce places each rule at position 1, ahead of the terminal DROP.
+func resolverRules(iface, dest string) [][]string {
+	return [][]string{
+		{"-o", iface, "-d", dest, "-p", "udp", "--dport", "53", "-j", "ACCEPT"},
+		{"-o", iface, "-d", dest, "-p", "tcp", "--dport", "53", "-j", "ACCEPT"},
+	}
+}
+
+// AllowResolver inserts the temporary resolver accepts for dest.
+func (f Firewall) AllowResolver(dest netip.Addr) error {
+	if err := validateIf(f.ExtIf); err != nil {
+		return err
+	}
+	if !dest.IsValid() {
+		return fmt.Errorf("resolver address is required")
+	}
+	if dest.Is6() && !f.IPv6 {
+		return fmt.Errorf("ipv6 is disabled")
+	}
+	bin := f.bin()
+	if dest.Is6() {
+		bin = f.bin6()
+	}
+	for _, rule := range resolverRules(f.ExtIf, dest.String()) {
+		if err := insertOnce(bin, chain, rule...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RevokeResolver removes the temporary resolver accepts for dest.
+func (f Firewall) RevokeResolver(dest netip.Addr) error {
+	if !dest.IsValid() {
+		return fmt.Errorf("resolver address is required")
+	}
+	bin := f.bin()
+	if dest.Is6() {
+		bin = f.bin6()
+	}
+	for _, rule := range resolverRules(f.ExtIf, dest.String()) {
+		_ = deleteRule(bin, chain, rule...)
+	}
+	return nil
+}
+
 // ReplaceEndpoint moves the OUTPUT dport allow and the INPUT sport allow.
 // The caller moves the host route.
 func (f Firewall) ReplaceEndpoint(old, next netip.Addr, port int) error {

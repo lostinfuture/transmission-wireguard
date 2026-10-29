@@ -57,17 +57,19 @@ type Sup struct {
 	died        bool
 	startedPath bool
 	tunnelUp    bool
+	healing     bool
 	tm          *exec.Cmd
 	tmCancel    context.CancelFunc
 	tmExited    chan struct{}
 	stopWait    chan struct{}
 	unexp       chan struct{}
 	reasserted  map[string]time.Time
+	rustCancel  context.CancelFunc
+	userspace   *userspaceProc
 }
 
 // Run brings the tunnel up, starts Transmission, and blocks until stop.
 func Run(cfg Config) error {
-	NoteRustnet(cfg.Rustnet)
 	s := &Sup{cfg: cfg, env: os.Environ(), unexp: make(chan struct{}, 1)}
 	s.cond = sync.NewCond(&s.mu)
 	if cfg.RootWarned {
@@ -75,9 +77,6 @@ func Run(cfg Config) error {
 	}
 	if !cfg.Kill {
 		logx.Warn("supervisor", "ENABLE_KILLSWITCH=false disables the egress drop")
-	}
-	if cfg.SelfHeal {
-		logx.Info("supervisor", "SELFHEAL is not implemented; the tunnel will not be restarted in-process")
 	}
 	if cfg.AllowUPnP {
 		logx.Warn("supervisor", "ALLOW_UPNP=true lets Transmission map ports on the LAN")
@@ -207,6 +206,11 @@ func Run(cfg Config) error {
 		s.teardown()
 		return err
 	}
+	rustCtx, rustCancel := context.WithCancel(context.Background())
+	s.mu.Lock()
+	s.rustCancel = rustCancel
+	s.mu.Unlock()
+	s.startRustnet(rustCtx)
 	if err := s.pinRoutes(); err != nil {
 		return fail(err)
 	}
@@ -217,10 +221,13 @@ func Run(cfg Config) error {
 		s.teardown()
 		return nil
 	}
-	if err := wireguard.AddLink(cfg.Dev); err != nil {
+	if err := s.openDevice(stop); err != nil {
+		if errors.Is(err, errStopped) {
+			s.teardown()
+			return nil
+		}
 		return fail(err)
 	}
-	s.created = true
 	addrs := make([]fmt.Stringer, len(wg.Addresses))
 	for i, a := range wg.Addresses {
 		addrs[i] = a
@@ -275,7 +282,7 @@ func Run(cfg Config) error {
 	if err := s.writeStatus(); err != nil {
 		logx.Warn("supervisor", "status write failed", "error", err.Error())
 	}
-	logx.Info("supervisor", "tunnel up", "dev", cfg.Dev, "mtu", strconv.Itoa(mtu), "bind", s.local)
+	logx.Info("supervisor", "tunnel up", "dev", cfg.Dev, "mtu", strconv.Itoa(mtu), "bind", s.local, "dataplane", cfg.Implementation)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -288,13 +295,29 @@ func Run(cfg Config) error {
 	}()
 	s.startTM(ctx)
 
-	select {
-	case <-stop:
-		s.teardown()
-		return nil
-	case <-s.unexp:
-		s.teardown()
-		return errors.New("transmission exited")
+	var healCh chan string
+	if cfg.SelfHeal {
+		healCh = make(chan string, 1)
+		go s.watchHealth(ctx, healCh)
+	}
+	for {
+		select {
+		case <-stop:
+			s.teardown()
+			return nil
+		case <-s.unexp:
+			s.teardown()
+			return errors.New("transmission exited")
+		case reason := <-healCh:
+			if signaled(stop) {
+				s.teardown()
+				return nil
+			}
+			if err := s.heal(ctx, stop, reason); errors.Is(err, errStopped) || signaled(stop) {
+				s.teardown()
+				return nil
+			}
+		}
 	}
 }
 
@@ -306,12 +329,17 @@ func (s *Sup) teardown() {
 	}
 	s.tornDown = true
 	s.closed = true
+	cancel := s.rustCancel
 	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	s.stopTM(true)
 	if s.accepted && s.cfg.Kill {
 		_ = s.fw.RevokeWG()
 		s.accepted = false
 	}
+	s.stopUserspace()
 	if s.created {
 		_ = wireguard.LinkDel(s.cfg.Dev)
 		s.created = false
@@ -331,6 +359,17 @@ func (s *Sup) teardown() {
 	s.tunnelUp = false
 	s.mu.Unlock()
 	_ = s.writeStatus()
+}
+
+func (s *Sup) openDevice(stop <-chan struct{}) error {
+	if s.cfg.Implementation == "userspace" {
+		return s.startUserspace(stop)
+	}
+	if err := wireguard.AddLink(s.cfg.Dev); err != nil {
+		return err
+	}
+	s.created = true
+	return nil
 }
 
 func (s *Sup) pinRoutes() error {
@@ -402,10 +441,14 @@ func (s *Sup) dropOriginal() error {
 }
 
 func (s *Sup) waitHandshake(stop <-chan struct{}) (int64, error) {
+	return s.waitFresh(stop, 0, false)
+}
+
+func (s *Sup) waitFresh(stop <-chan struct{}, recorded int64, requireNewer bool) (int64, error) {
 	deadline := time.Now().Add(s.cfg.HandshakeWait)
 	for {
 		ts, err := wireguard.Latest(s.cfg.Dev, s.wg.PublicKey)
-		if err == nil && wireguard.Fresh(ts, time.Now().Unix(), 0, false) {
+		if err == nil && wireguard.Fresh(ts, time.Now().Unix(), recorded, requireNewer) {
 			return ts, nil
 		}
 		if !time.Now().Before(deadline) {

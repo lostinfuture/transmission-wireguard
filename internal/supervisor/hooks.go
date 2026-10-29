@@ -231,7 +231,16 @@ func secretEnvName(k string) bool {
 }
 
 func (s *Sup) pump(r io.Reader, component string) {
+	s.pumpTo(r, component, false)
+}
+
+func (s *Sup) pumpRaw(r io.Reader, component string) {
+	s.pumpTo(r, component, true)
+}
+
+func (s *Sup) pumpTo(r io.Reader, component string, raw bool) {
 	// Transmission lines are logged after secret redaction.
+	// Rustnet uses raw so JSONL quotes stay intact.
 	buf := make([]byte, 0, 256)
 	tmp := make([]byte, 4096)
 	for {
@@ -248,13 +257,22 @@ func (s *Sup) pump(r io.Reader, component string) {
 			if line == "" {
 				continue
 			}
-			logx.Child(component, s.redact(line))
+			s.emitChild(component, line, raw)
 		}
 		if err != nil {
 			if len(buf) > 0 {
-				logx.Child(component, s.redact(string(buf)))
+				s.emitChild(component, string(buf), raw)
 			}
 			return
 		}
 	}
+}
+
+func (s *Sup) emitChild(component, line string, raw bool) {
+	line = s.redact(line)
+	if raw {
+		logx.ChildRaw(component, line)
+		return
+	}
+	logx.Child(component, line)
 }

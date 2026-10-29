@@ -77,8 +77,16 @@ func printVersions() error {
 	if err != nil {
 		return fmt.Errorf("wg: %w", err)
 	}
-	fmt.Println("rustnet absent")
-	return nil
+	if _, err := exec.LookPath("rustnet"); err != nil {
+		fmt.Println("rustnet absent")
+	} else if err := requireVersion("rustnet", []string{"--version"}, "1.7.0"); err != nil {
+		return err
+	}
+	if _, err := exec.LookPath("wireguard-go"); err != nil {
+		fmt.Println("wireguard-go absent")
+		return nil
+	}
+	return requireVersion("wireguard-go", []string{"--version"}, "0.0.20250522")
 }
 
 func requireVersion(bin string, args []string, needle string) error {

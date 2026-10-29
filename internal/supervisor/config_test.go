@@ -93,8 +93,8 @@ func TestWireGuardEnv(t *testing.T) {
 			t.Fatalf("%s accepted", env)
 		}
 	}
-	_, err = LoadFrom([]string{"WG_IMPLEMENTATION=userspace"})
-	if err == nil || err.Error() != "WG_IMPLEMENTATION=userspace is not in this release" {
+	cfg, err = LoadFrom([]string{"WG_IMPLEMENTATION=userspace"})
+	if err != nil || cfg.Implementation != "userspace" {
 		t.Fatal(err)
 	}
 	_, err = LoadFrom([]string{"WG_IMPLEMENTATION=Kernel"})

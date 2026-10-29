@@ -95,7 +95,7 @@ func LoadFrom(env []string) (Config, error) {
 	switch m["WG_IMPLEMENTATION"] {
 	case "", "kernel":
 	case "userspace":
-		return Config{}, errors.New("WG_IMPLEMENTATION=userspace is not in this release")
+		cfg.Implementation = "userspace"
 	default:
 		return Config{}, errors.New("WG_IMPLEMENTATION must be kernel or userspace")
 	}
@@ -215,7 +215,7 @@ func LoadFrom(env []string) (Config, error) {
 }
 
 // NoteRustnet logs once when Rustnet was requested and /usr/bin/rustnet is missing.
-// v0.1.0 does not ship the binary. Callers continue either way.
+// The armv7 image omits the binary. Callers continue either way.
 func NoteRustnet(enabled bool) {
 	if !enabled {
 		return

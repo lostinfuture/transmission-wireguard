@@ -1,3 +1,5 @@
+# Kernel dataplane. Userspace: examples/userspace.override.yml.
+# Rustnet stays off. Capabilities and the BTF mount: examples/rustnet.override.yml.
 services:
   transmission-wireguard:
     image: ghcr.io/lostinfuture/transmission-wireguard:edge
@@ -15,6 +17,7 @@ services:
     tmpfs:
       - /run
     environment:
+      # SELFHEAL stays unset. true restarts WireGuard inside this process. Do not combine it with autoheal.
       LOCAL_NETWORK: 192.168.1.0/24
       PUID: "1000"
       PGID: "1000"

@@ -15,6 +15,12 @@ ARG TRANSMISSIONIC_VERSION=1.9.0
 ARG TRANSMISSIONIC_URL=https://github.com/lostinfuture/transmissionic/releases/download/v1.9.0/Transmissionic-webui-v1.9.0.zip
 ARG TRANSMISSIONIC_SHA256=3bbeca59cda846041963bf668e57810829ac1ecc3d0ef01c70f2b68234e0e351
 ARG TRANSMISSIONIC_REVISION=d5825a48b188c0089c80acb62b57bb54e24e641b
+ARG WIREGUARD_GO_VERSION=0.0.20250522
+ARG WIREGUARD_GO_URL=https://git.zx2c4.com/wireguard-go/snapshot/wireguard-go-0.0.20250522.tar.xz
+ARG WIREGUARD_GO_SHA256=c7eeffb13e5eb43b93e54a21d78dd71414771af9e07112da5275690493695c9c
+ARG RUSTNET_VERSION=1.7.0
+ARG RUSTNET_URL=https://github.com/domcyrus/rustnet/archive/refs/tags/v1.7.0.tar.gz
+ARG RUSTNET_SHA256=9d3f6509da06f832c04c5accc7b777c18f3de8b32c885137c9a1346990694dda
 
 FROM alpine:${ALPINE_VERSION} AS transmission-src
 ARG TRANSMISSION_URL TRANSMISSION_SHA256
@@ -124,6 +130,51 @@ RUN apk add --no-cache ca-certificates wget unzip \
     && rm -rf /tmp/transmissionic.zip /tmp/unpack \
     && if find /opt/transmission-ui/transmissionic \( -name '*.sh' -o -name '*.py' \) | grep -q .; then echo "script left in transmissionic" >&2; exit 1; fi
 
+FROM --platform=$BUILDPLATFORM alpine:${ALPINE_VERSION} AS wireguard-go
+ARG TARGETOS TARGETARCH TARGETVARIANT
+ARG WIREGUARD_GO_URL WIREGUARD_GO_SHA256
+RUN apk add --no-cache ca-certificates wget xz go \
+    && wget -O /tmp/wireguard-go.tar.xz "${WIREGUARD_GO_URL}" \
+    && echo "${WIREGUARD_GO_SHA256}  /tmp/wireguard-go.tar.xz" | sha256sum -c \
+    && mkdir -p /src \
+    && tar -xJf /tmp/wireguard-go.tar.xz -C /src --strip-components=1 \
+    && rm /tmp/wireguard-go.tar.xz \
+    && cd /src \
+    && case "${TARGETARCH}" in \
+         arm) export GOARM="${TARGETVARIANT#v}" ;; \
+       esac \
+    && GOTOOLCHAIN=local CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+         go build -trimpath -buildvcs=false -ldflags "-s -w" -o /out/wireguard-go . \
+    && test -x /out/wireguard-go \
+    && grep -q "Permission is hereby granted" /src/LICENSE \
+    && cp /src/LICENSE /out/LICENSE
+
+FROM alpine:${ALPINE_VERSION} AS rustnet
+ARG TARGETARCH RUSTNET_URL RUSTNET_SHA256 RUSTNET_VERSION
+RUN mkdir -p /out/bin /out/licenses \
+    && if [ "${RUSTNET_SHA256}" = "UNPINNED" ]; then echo "RUSTNET_SHA256 is UNPINNED" >&2; exit 1; fi \
+    && case "${TARGETARCH}" in \
+         amd64|arm64) \
+           apk add --no-cache ca-certificates wget build-base \
+             cargo rustfmt clang llvm linux-headers \
+             libpcap-dev elfutils-dev zlib-dev pkgconf \
+           && wget -O /tmp/rustnet.tar.gz "${RUSTNET_URL}" \
+           && echo "${RUSTNET_SHA256}  /tmp/rustnet.tar.gz" | sha256sum -c \
+           && mkdir -p /src \
+           && tar -xzf /tmp/rustnet.tar.gz -C /src --strip-components=1 \
+           && rm /tmp/rustnet.tar.gz \
+           && cd /src \
+           && cargo build --release --locked \
+           && test -x /src/target/release/rustnet \
+           && cp /src/target/release/rustnet /out/bin/rustnet \
+           && cp /src/LICENSE /out/licenses/LICENSE \
+           && test -s /out/licenses/LICENSE \
+           ;; \
+         *) \
+           echo "skipping rustnet on ${TARGETARCH}" \
+           ;; \
+       esac
+
 FROM alpine:${ALPINE_VERSION}
 RUN apk add --no-cache \
         ca-certificates \
@@ -139,6 +190,9 @@ RUN apk add --no-cache \
         libstdc++ \
         libgcc \
         libcap \
+        libpcap \
+        libelf \
+        zlib \
     && apk upgrade --no-cache
 COPY --from=transmission-build /usr/bin/transmission-daemon /usr/bin/transmission-daemon
 COPY --from=transmission-build /usr/share/transmission/public_html /usr/share/transmission/public_html
@@ -148,8 +202,18 @@ COPY --from=flood /usr/share/licenses/flood-for-transmission /usr/share/licenses
 COPY --from=transmissionic /opt/transmission-ui/transmissionic /opt/transmission-ui/transmissionic
 COPY --from=transmissionic /usr/share/licenses/transmissionic /usr/share/licenses/transmissionic
 COPY --from=supervisor /out/wg-supervisor /usr/bin/wg-supervisor
+COPY --from=wireguard-go /out/wireguard-go /usr/bin/wireguard-go
+COPY --from=wireguard-go /out/LICENSE /usr/share/licenses/wireguard-go/LICENSE
+COPY --from=rustnet /out/ /tmp/rustnet/
+COPY sbom/rustnet.cdx.json /usr/share/licenses/rustnet/rustnet.cdx.json
 RUN set -o pipefail \
-    && chmod 0755 /usr/bin/transmission-daemon /usr/bin/wg-supervisor \
+    && if [ -x /tmp/rustnet/bin/rustnet ]; then \
+         mv /tmp/rustnet/bin/rustnet /usr/bin/rustnet \
+         && mv /tmp/rustnet/licenses/LICENSE /usr/share/licenses/rustnet/LICENSE \
+         && chmod 0755 /usr/bin/rustnet; \
+       fi \
+    && rm -rf /tmp/rustnet \
+    && chmod 0755 /usr/bin/transmission-daemon /usr/bin/wg-supervisor /usr/bin/wireguard-go \
     && test -f /opt/transmission-ui/flood-for-transmission/index.html \
     && test -s /usr/share/licenses/flood-for-transmission/LICENSE \
     && grep -q 6d6c6fda7a507c864085d3c159ca6fe2886de06d /usr/share/licenses/flood-for-transmission/SOURCE \
@@ -162,10 +226,24 @@ RUN set -o pipefail \
     && ! command -v bash \
     && ! command -v python3 \
     && ! command -v natpmpc \
-    && ldd /usr/bin/transmission-daemon | tee /tmp/ldd.out \
+    && bins="/usr/bin/transmission-daemon" \
+    && if [ -x /usr/bin/rustnet ]; then bins="$bins /usr/bin/rustnet"; fi \
+    && ldd $bins | tee /tmp/ldd.out \
     && ! grep -E -q 'not found|Error relocating|Error loading' /tmp/ldd.out \
     && rm /tmp/ldd.out \
-    && if getcap /usr/bin/transmission-daemon | grep -q .; then exit 1; fi \
+    && if getcap $bins /usr/bin/wireguard-go | grep -q .; then exit 1; fi \
+    && test -s /usr/share/licenses/wireguard-go/LICENSE \
+    && grep -q "Permission is hereby granted" /usr/share/licenses/wireguard-go/LICENSE \
+    && /usr/bin/wireguard-go --version | grep -q 0.0.20250522 \
+    && if [ -x /usr/bin/rustnet ]; then \
+         test -s /usr/share/licenses/rustnet/LICENSE \
+         && grep -q "Apache License" /usr/share/licenses/rustnet/LICENSE \
+         && grep -q '"name": "rustnet"' /usr/share/licenses/rustnet/rustnet.cdx.json \
+         && grep -q 'pkg:github/domcyrus/rustnet@v1.7.0' /usr/share/licenses/rustnet/rustnet.cdx.json \
+         && grep -q '"value": "absent"' /usr/share/licenses/rustnet/rustnet.cdx.json \
+         && /usr/bin/rustnet --version | grep -q 1.7.0 \
+         && if getcap /usr/bin/rustnet | grep -q .; then exit 1; fi; \
+       fi \
     && apk del libcap
 ARG SUPERVISOR_VERSION
 LABEL org.opencontainers.image.title=transmission-wireguard \
@@ -175,6 +253,8 @@ LABEL org.opencontainers.image.title=transmission-wireguard \
       org.opencontainers.image.licenses="Apache-2.0 AND MIT AND (GPL-2.0-only OR GPL-3.0-only) AND GPL-2.0-only AND GPL-3.0-only" \
       dev.lostinfuture.transmission.version=4.1.4 \
       dev.lostinfuture.wireguard-tools.version=1.0.20260223 \
+      dev.lostinfuture.wireguard-go.version=0.0.20250522 \
+      dev.lostinfuture.rustnet.version=1.7.0 \
       dev.lostinfuture.flood.revision=6d6c6fda7a507c864085d3c159ca6fe2886de06d \
       dev.lostinfuture.transmissionic.version=1.9.0 \
       autoheal=true

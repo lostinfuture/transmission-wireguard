@@ -1,0 +1,17 @@
+# Opt-in Rustnet. Compose replaces cap_add; it does not merge the lists.
+# This file repeats NET_ADMIN and adds the capture capabilities.
+#   docker compose -f docker-compose.yml -f examples/rustnet.override.yml up -d
+# The BTF mount is read-only. There is no SYS_ADMIN and no --privileged.
+# ENABLE_RUSTNET starts the headless JSONL process. Leave it unset when you
+# only want the interactive TUI: docker exec -it <container> rustnet --interface any --no-resolve-dns --no-geoip
+services:
+  transmission-wireguard:
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - BPF
+      - PERFMON
+    volumes:
+      - /sys/kernel/btf:/sys/kernel/btf:ro
+    environment:
+      ENABLE_RUSTNET: "true"

@@ -151,6 +151,9 @@ func (s *Sup) startTM(ctx context.Context) {
 	}
 	s.tm = cmd
 	s.tmExited = exited
+	// A later heal calls stopTM. That returns immediately while stoppedTM is set.
+	s.stoppedTM = false
+	s.died = false
 	s.starting = false
 	s.cond.Broadcast()
 	s.mu.Unlock()

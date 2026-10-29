@@ -169,6 +169,85 @@ func Kick(dev, pub string) error {
 	return SetKeepalive(dev, pub, 0)
 }
 
+// Provoke sends one initiation after a peer was re-added with no keepalive.
+// The new peer's interval is 0, so setting 1 is the 0-to-positive send.
+// The configured interval is written back when it is not already 1.
+// Absent and 0 both finish at 0. 1 stays at 1. Any other N finishes at N.
+func Provoke(dev, pub string, configured int) error {
+	if err := SetKeepalive(dev, pub, 1); err != nil {
+		return err
+	}
+	if configured == 1 {
+		return nil
+	}
+	if configured < 0 {
+		configured = 0
+	}
+	return SetKeepalive(dev, pub, configured)
+}
+
+// RemovePeer deletes one peer. A peer the device does not have is success.
+func RemovePeer(dev, pub string) error {
+	if err := ValidDev(dev); err != nil {
+		return err
+	}
+	out, err := runCmd("wg", "set", dev, "peer", pub, "remove")
+	if err != nil {
+		if peerMissing(string(out)) {
+			return nil
+		}
+		return fmt.Errorf("wg peer remove: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func peerMissing(msg string) bool {
+	msg = strings.ToLower(msg)
+	return strings.Contains(msg, "no such") || strings.Contains(msg, "unable to find") || strings.Contains(msg, "not found")
+}
+
+// AddPeerArgv is the heal re-add. It has no private key, listen port, or keepalive.
+func AddPeerArgv(dev, pub, endpoint string, psk bool, allowed []string) []string {
+	args := []string{"set", dev, "peer", pub}
+	if psk {
+		args = append(args, "preshared-key", filepath.Join(keyDir, "presharedkey"))
+	}
+	args = append(args, "endpoint", endpoint, "allowed-ips", strings.Join(allowed, ","))
+	return args
+}
+
+// ReaddPeer installs the peer again with no persistent-keepalive.
+// The preshared-key file exists only while wg set runs.
+func ReaddPeer(dev string, cfg Config, endpoint string) error {
+	if err := ValidDev(dev); err != nil {
+		return err
+	}
+	psk := cfg.PresharedKey != ""
+	if psk {
+		if err := os.MkdirAll(keyDir, 0o700); err != nil {
+			return err
+		}
+		if err := os.Chmod(keyDir, 0o700); err != nil {
+			return err
+		}
+		path := filepath.Join(keyDir, "presharedkey")
+		defer os.Remove(path)
+		if err := writeKey(path, cfg.PresharedKey); err != nil {
+			return err
+		}
+	}
+	allowed := make([]string, len(cfg.AllowedIPs))
+	for i, p := range cfg.AllowedIPs {
+		allowed[i] = p.String()
+	}
+	args := AddPeerArgv(dev, cfg.PublicKey, endpoint, psk, allowed)
+	out, err := runCmd("wg", args...)
+	if err != nil {
+		return fmt.Errorf("wg peer add: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // ApplyKeepaliveEdge is the healthcheck provoke.
 // It sets 0, then 1 or the configured interval, waits, then restores the configured interval.
 func ApplyKeepaliveEdge(set func(int) error, configured int, wait func() bool) error {

@@ -2,7 +2,7 @@
 
 Transmission and kernel WireGuard in one container. The torrent client starts after a fresh handshake. A kill switch drops traffic that would leave any other way.
 
-The image is Alpine, with Transmission 4.1.4, wireguard-tools 1.0.20260223 (`wg` only), and a static Go supervisor. It runs on `linux/amd64`, `linux/arm64`, and `linux/arm/v7`. The v0.1.0 dataplane is the kernel. `wireguard-go` and Rustnet are not in this image.
+The image is Alpine, with Transmission 4.1.4, wireguard-tools 1.0.20260223 (`wg` only), wireguard-go 0.0.20250522, Rustnet 1.7.0 on amd64 and arm64, and a static Go supervisor. It runs on `linux/amd64`, `linux/arm64`, and `linux/arm/v7`. The dataplane is the kernel unless you set `WG_IMPLEMENTATION=userspace`.
 
 `docker-compose.yml` uses `ghcr.io/lostinfuture/transmission-wireguard:edge`. `main` publishes `edge` and `sha-<12>` after the image scan reports no Critical and no High findings. A version tag also publishes `latest`. Until that tag exists, build locally and point `image:` at `twg:dev`.
 
@@ -14,7 +14,7 @@ The supervisor reads one WireGuard file, pins the endpoint to a single address, 
 
 ## Before you start
 
-The host needs Linux 5.6 or newer with `CONFIG_WIREGUARD`. The container has `NET_ADMIN` and can autoload the module when the kernel allows it. This image does not run `modprobe`, and it does not fall back to `wireguard-go`. If autoload is blocked (some SELinux policies, rootless Docker, user namespaces), load it on the host:
+The host needs Linux 5.6 or newer with `CONFIG_WIREGUARD`. The container has `NET_ADMIN` and can autoload the module when the kernel allows it. This image does not run `modprobe`, and a missing module does not fall back to `wireguard-go`. If autoload is blocked (some SELinux policies, rootless Docker, user namespaces), load it on the host:
 
 ```bash
 sudo modprobe wireguard
@@ -23,7 +23,7 @@ echo wireguard | sudo tee /etc/modules-load.d/wireguard.conf
 
 A missing module exits 1 with `host kernel has no WireGuard device type (need Linux >= 5.6 with CONFIG_WIREGUARD loaded). This image does not modprobe and does not fall back to wireguard-go.`
 
-`WG_IMPLEMENTATION=userspace` exits 1 with `WG_IMPLEMENTATION=userspace is not in this release`.
+A host that has no kernel module can opt in to userspace. See [Userspace WireGuard](#userspace-wireguard). Anything other than `kernel` or `userspace` exits 1 with `WG_IMPLEMENTATION must be kernel or userspace`.
 
 Mount a directory on `/etc/wireguard`, read-only. `WIREGUARD_CONFIG=wg0` reads `/etc/wireguard/wg0.conf`. The directory and the file must be owned by root, must not be symlinks, and must not be writable by group or other. The file has one `[Interface]` and one `[Peer]`. `PostUp`, `PreUp`, `PostDown`, `PreDown`, `Table`, `SaveConfig`, and `FwMark` are rejected, including `Table=off` and `SaveConfig=false`. The operator file is never passed to `wg-quick` or `wg setconf`.
 
@@ -35,7 +35,7 @@ Port `9091` is the web UI. With no RPC username or password, anyone who can reac
 
 Do not set any `OPENVPN_*` variable, `CREATE_TUN_DEVICE`, `ENABLE_UFW`, `PORT_FORWARD`, or the NordVPN and PIA variables from transmission-openvpn. Those names are fatal even when the value is `false` or empty. The message is `this image is not transmission-openvpn; unset <NAME>`. Other unknown variables are not fatal.
 
-There is no `/dev/net/tun` mount. The kernel dataplane does not use it.
+The kernel dataplane does not use `/dev/net/tun`. The userspace opt-in does. See [Userspace WireGuard](#userspace-wireguard).
 
 ## Start
 
@@ -89,7 +89,9 @@ Startup logs `endpoint pinned`, then `tunnel up`, then `transmission started`. `
 
 A hostname is resolved once, before the kill switch is installed. The supervisor keeps the first IPv4. When IPv6 is enabled and there is no IPv4 answer, it keeps the first IPv6. The rest are logged as `unused=<n>` and are not tried. If that first address is dead, pin a literal `Endpoint` in the WireGuard file.
 
-The firewall allow and the host route use that IP. Kernel WireGuard can learn a new endpoint from an authenticated packet, but this firewall drops that packet, so the peer entry never updates. The pin stays until the container restarts. `SELFHEAL` is not implemented in this image, so a peer that changes address stays down until you restart the container.
+The firewall allow and the host route use that IP. Kernel WireGuard can learn a new endpoint from an authenticated packet. This firewall drops that packet, so the peer entry stays on the pin.
+
+`SELFHEAL` defaults to false. While it is false, the pin stays until the container restarts. Set it to true to restart WireGuard inside this process. The supervisor handshakes the pinned IP first. When `Endpoint` is a hostname and that handshake times out, it looks the name up through a temporary resolver path and moves the pin when the address changed. A literal `Endpoint` stays as written. An idle tunnel with no keepalive reaches a handshake age of 180 seconds and, with the flag set, restarts Transmission on the next 30 second tick. Leave the flag false on a quiet box, set a keepalive, or set `HEALTH_CHECK_HOST`. Do not run autoheal while `SELFHEAL=true`.
 
 ## If something feels wrong
 
@@ -108,8 +110,8 @@ Bool values are `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`, in any case. An
 | Variable | Default | What to set |
 | :--- | :--- | :--- |
 | `WIREGUARD_CONFIG` | `wg0` | Basename in `/etc/wireguard`, without `.conf`. |
-| `WG_IMPLEMENTATION` | `kernel` | `kernel` only. `userspace` exits 1. |
-| `WG_HANDSHAKE_TIMEOUT` | `30` | Seconds to wait for the first handshake. Integer 5–120. |
+| `WG_IMPLEMENTATION` | `kernel` | `kernel` or `userspace`. Empty is `kernel`. There is no `auto`. |
+| `WG_HANDSHAKE_TIMEOUT` | `30` | Seconds to wait for the first handshake and for each SELFHEAL handshake. Integer 5–120. |
 | `LOCAL_NETWORK` | empty | Comma-separated prefixes via the original gateway. Required for a LAN web UI. |
 | `PUID`, `PGID` | `1000` | User and group for Transmission. `0` is root, with a warning. Setting one copies it to the other. |
 | `ENABLE_KILLSWITCH` | `true` | `false` disables the egress drop and logs a warning. |
@@ -128,9 +130,9 @@ Bool values are `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`, in any case. An
 | `TRANSMISSION_WEB_HOME` | empty | When set, wins over `TRANSMISSION_WEB_UI`. |
 | `TRANSMISSION_MESSAGE_LEVEL` | Transmission's own default, `4` | Not forced. `2` is error on the 4.x scale. |
 | `TRANSMISSION_CACHE_SIZE_MIB` | Transmission's own default, `4` | Disk cache in MiB. `0` turns it off. `TRANSMISSION_CACHE_SIZE_MB` sets the same value. If both are set they must be equal. |
-| `SELFHEAL` | `false` | Parsed. `true` logs `SELFHEAL is not implemented; the tunnel will not be restarted in-process` and does not heal. |
-| `HEALTH_CHECK_HOST` | empty | When set, the healthcheck dials this host on port 443, bound to the WireGuard address. |
-| `ENABLE_RUSTNET` | `false` | `true` logs that the binary is absent and continues. Rustnet is not in this image. |
+| `SELFHEAL` | `false` | `true` stops Transmission, revokes the device accept, and handshakes the pinned IP. A hostname is looked up only if that handshake times out, through a temporary resolver path that is removed before Transmission starts. A literal is left as written. The log line is `restarting wireguard` with reason `wg address is missing`, `handshake is stale`, or `health dial failed three times`. The process stays up, so Docker `restart:` does not fire. Do not combine with autoheal. |
+| `HEALTH_CHECK_HOST` | empty | When set, the healthcheck dials this host on port 443, bound to the WireGuard address. With `SELFHEAL=true`, three failed dials also restart the tunnel. |
+| `ENABLE_RUSTNET` | `false` | `true` starts the headless monitor. On armv7 the binary is absent: `true` logs `this arch has no Rustnet` and continues. The interactive TUI does not need this variable. |
 | `RUSTNET_REFRESH_MS` | `5000` | Integer ≥ 1000. A bad value exits 1. |
 | `RUSTNET_PCAP` | empty | Absolute path under `/config`, or empty. |
 
@@ -160,14 +162,53 @@ The six arguments are `<dev> <mtu> <empty> <wg-ipv4> <endpoint-ip> <context>`. `
 
 The Compose file does not mount `/scripts`. The supervisor does not reap a process a hook backgrounds.
 
+## Userspace WireGuard
+
+`WG_IMPLEMENTATION=userspace` runs `/usr/bin/wireguard-go -f <dev>` from tag 0.0.20250522. The same `wg set` path and the same kill switch follow. It creates a TUN device. It does not also run `ip link add type wireguard`. The process needs `/dev/net/tun` in the container. It does not need `NET_RAW` or `SYS_MODULE`.
+
+On stop the supervisor sends SIGTERM and SIGKILL after 5 seconds. On an architecture without the binary, userspace exits 1 with `this arch has no wireguard-go`. Kernel mode on that architecture is unchanged. This image builds the binary for amd64, arm64, and armv7.
+
+`wireguard-go` prints a warning on stderr when it starts on Linux. That warning is upstream text. It does not fail the start. The lines are logged as `component=wg`.
+
+`examples/userspace.override.yml` adds the TUN device and sets the variable. It does not add `NET_RAW`.
+
+```bash
+docker compose -f docker-compose.yml -f examples/userspace.override.yml up -d
+```
+
+The kernel stays the default. A missing module still exits 1 until you set `userspace` yourself.
+
+## Rustnet
+
+`ENABLE_RUSTNET` defaults to false. The supervisor starts the headless monitor after the kill switch and before the WireGuard device, so the capture sees the original interface. It does not restart the capture when the handshake completes. On an image without `/usr/bin/rustnet` (armv7), `true` logs once and continues.
+
+The arguments are `rustnet --headless --output jsonl --interface any --no-resolve-dns --no-geoip --refresh-interval <RUSTNET_REFRESH_MS>`. `RUSTNET_REFRESH_MS` defaults to 5000. A value below 1000, or a value that is not an integer, is a fatal error. Stdout and stderr are prefixed `component=rustnet`, and the JSONL is left intact.
+
+`RUSTNET_PCAP` defaults to empty. When set, it must be an absolute path under `/config`. The supervisor refuses a symlink, creates a regular file mode `0600`, and passes it as `--pcap-export`. If Rustnet exits, the tunnel stays up. The supervisor restarts it with backoff at most five times in ten minutes, then logs an error and leaves it down until the next container start. The healthcheck does not read Rustnet.
+
+The interactive TUI is a second process. Leave `ENABLE_RUSTNET` unset and run:
+
+```bash
+docker exec -it transmission-wireguard rustnet --interface any --no-resolve-dns --no-geoip
+```
+
+The binary has no file capabilities. The image does not build the `kubernetes` Cargo feature. The supervisor and Rustnet do not inherit password or key variables.
+
+The TUI needs `NET_RAW`, `BPF`, and `PERFMON` in addition to `NET_ADMIN`, plus a read-only `/sys/kernel/btf` mount. `examples/rustnet.override.yml` adds those and sets `ENABLE_RUSTNET=true` for the headless process. Compose replaces `cap_add`, so that file repeats `NET_ADMIN`. For the TUI only, use the capabilities and the mount from that file and leave the variable unset. The capture can name host processes. kprobes are host-wide.
+
+```bash
+docker compose -f docker-compose.yml -f examples/rustnet.override.yml up -d
+```
+
 ## Recovery
 
-Two mechanisms. The root Compose file enables only the first.
+Three mechanisms. The root Compose file enables only the first.
 
-- **Docker `restart:`** starts a new container after this process exits. `docker-compose.yml` sets `unless-stopped`. A handshake timeout exits 1, so Docker restarts it. An unexpected Transmission exit also exits 1.
+- **Docker `restart:`** starts a new container after this process exits. `docker-compose.yml` sets `unless-stopped`. A handshake timeout on startup exits 1, so Docker restarts it. An unexpected Transmission exit also exits 1.
 - **`willfarrell/autoheal`** restarts containers whose healthcheck fails. The image sets the `autoheal=true` label. The label does nothing unless you run that sidecar.
+- **`SELFHEAL`** restarts WireGuard inside this process. It does not exit PID 1, so `restart:` does not fire. The default is false, and the root Compose file does not set it. Do not run autoheal and `SELFHEAL` together. Both react to a dead peer, and autoheal restarts the container while the heal still owns the interface.
 
-`SELFHEAL=true` does not restart the tunnel inside this process. A failed healthcheck is what autoheal sees. The Docker healthcheck is interval 30s, timeout 15s, retries 3, start period 210s. An idle handshake older than 180 seconds is provoked once. The probe fails only if that initiation does not land within 3 seconds, and the configured keepalive is restored either way.
+The Docker healthcheck is interval 30s, timeout 15s, retries 3, start period 210s. An idle handshake older than 180 seconds is provoked once. The probe fails only if that initiation does not land within 3 seconds, and the configured keepalive is restored either way.
 
 ## Pull the image
 
@@ -190,7 +231,7 @@ scripts/remote.sh selftest
 scripts/remote.sh e2e
 ```
 
-`build` tags `twg:dev` and does not push. A local Docker engine can do the same:
+`build` tags `twg:dev` and does not push. The Docker context includes `sbom/`. A copy that omits it fails on `COPY sbom/rustnet.cdx.json`. A local Docker engine can do the same:
 
 ```bash
 docker build -t twg:dev .
@@ -200,7 +241,7 @@ docker run --rm --cap-add=NET_ADMIN twg:dev \
   drop-exec --uid 65534 --gid 65534 --nofile 64 -- cat /proc/self/status
 ```
 
-`version` prints the supervisor version, requires `transmission-daemon 4.1.4`, prints `wg --version`, and prints `rustnet absent`. `firewall-selftest` installs the kill switch in that container and removes it on the way out. `drop-exec` should show `CapBnd` as all zeros. The bounding set is dropped before `execve`. Dropping it needs `SETPCAP`, which is in Docker's default set and is kept by `--cap-add=NET_ADMIN`.
+`version` prints the supervisor version, requires `transmission-daemon 4.1.4`, and prints `wg --version`. When the binaries are in the image it also prints `rustnet` 1.7.0 and `wireguard-go` 0.0.20250522. A missing binary prints `rustnet absent` or `wireguard-go absent` and `version` still exits 0. `firewall-selftest` installs the kill switch in that container and removes it on the way out. `drop-exec` should show `CapBnd` as all zeros. The bounding set is dropped before `execve`. Dropping it needs `SETPCAP`, which is in Docker's default set and is kept by `--cap-add=NET_ADMIN`.
 
 A bare `run` with no WireGuard file exits 1. `list-providers`, `check-snapshot`, `hook-up`, and `hook-down` exit 2.
 
@@ -212,6 +253,8 @@ The image also contains other programs, on their own terms:
 
 - [Transmission](https://github.com/transmission/transmission) 4.1.4, GPL-2.0-only OR GPL-3.0-only, with the OpenSSL exception in its `COPYING`. Some files are MIT.
 - [wireguard-tools](https://git.zx2c4.com/wireguard-tools/) 1.0.20260223, GPL-2.0-only. The image installs the `wg` package only. `wg-quick` is not installed.
+- [wireguard-go](https://git.zx2c4.com/wireguard-go/) 0.0.20250522, MIT. Built from the tag tarball with `CGO_ENABLED=0`, not from the Alpine package.
+- [Rustnet](https://github.com/domcyrus/rustnet) 1.7.0, Apache-2.0, on amd64 and arm64.
 - [flood-for-transmission](https://github.com/johman10/flood-for-transmission) v1.0.1, GPL-3.0-only.
 - [Transmissionic](https://github.com/lostinfuture/transmissionic) v1.9.0, MIT.
 
