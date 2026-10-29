@@ -1,0 +1,35 @@
+services:
+  transmission-wireguard:
+    image: ghcr.io/lostinfuture/transmission-wireguard:edge
+    container_name: transmission-wireguard
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    stop_grace_period: 45s
+    ports:
+      - "9091:9091"
+    tmpfs:
+      - /run
+    environment:
+      LOCAL_NETWORK: 192.168.1.0/24
+      PUID: "1000"
+      PGID: "1000"
+    volumes:
+      - /path/to/downloads:/data
+      - /path/to/transmission/config:/config
+      - /path/to/wireguard:/etc/wireguard:ro
+    healthcheck:
+      test: ["CMD", "/usr/bin/wg-supervisor", "healthcheck"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 210s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

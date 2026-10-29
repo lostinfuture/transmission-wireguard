@@ -1,0 +1,248 @@
+name: Build and Publish Docker Image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "Dockerfile"
+      - "cmd/**"
+      - "internal/**"
+      - "go.mod"
+      - ".github/workflows/build-docker.yml"
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  schedule:
+    # Rebuild every Monday 04:00 UTC from the pinned Dockerfile.
+    # Transmission, the web UI archives, and the Go source do not float.
+    # This run publishes edge so Alpine package updates can ship. It does not move latest.
+    - cron: "0 4 * * 1"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  PLATFORMS: linux/amd64,linux/arm64,linux/arm/v7
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      channel: ${{ steps.version.outputs.channel }}
+      major_minor: ${{ steps.version.outputs.major_minor }}
+      major: ${{ steps.version.outputs.major }}
+    steps:
+      - name: Resolve image version
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "${REF_TYPE}" = "tag" ]; then
+            VERSION="${REF_NAME#v}"
+            CHANNEL=release
+            MAJOR_MINOR="${VERSION%.*}"
+            MAJOR="${VERSION%%.*}"
+          else
+            VERSION=edge
+            CHANNEL=edge
+            MAJOR_MINOR=""
+            MAJOR=""
+          fi
+          echo "Resolved ${CHANNEL} version: ${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "channel=${CHANNEL}" >> "$GITHUB_OUTPUT"
+          echo "major_minor=${MAJOR_MINOR}" >> "$GITHUB_OUTPUT"
+          echo "major=${MAJOR}" >> "$GITHUB_OUTPUT"
+
+  scan:
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: [linux/amd64, linux/arm64, linux/arm/v7]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: ${{ env.PLATFORMS }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@e07451d2e059ed86c2870430ea286b3a9e0bf241
+        with:
+          version: v0.76.1
+          cache: true
+
+      - name: Build one platform
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          scope="${PLATFORM//\//-}"
+          docker buildx build \
+            --build-arg SUPERVISOR_VERSION="${VERSION}" \
+            --platform "${PLATFORM}" \
+            --cache-from "type=gha,scope=${scope}" \
+            --cache-to "type=gha,scope=${scope},mode=max" \
+            --provenance=false \
+            --sbom=false \
+            -o "type=docker,dest=/tmp/${scope}.tar" \
+            .
+
+      - name: Scan for Critical and High vulnerabilities
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          scope="${PLATFORM//\//-}"
+          trivy image \
+            --input "/tmp/${scope}.tar" \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --scanners vuln
+
+  publish:
+    needs: [version, scan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: ${{ env.PLATFORMS }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          platforms: ${{ env.PLATFORMS }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check Docker Hub credentials
+        id: dockerhub
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${DOCKER_PASSWORD}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "username=${DOCKER_USERNAME:-lostinfuture}" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "username=lostinfuture" >> "$GITHUB_OUTPUT"
+            echo "::warning::DOCKER_PASSWORD secret is not set; publishing to GHCR only."
+          fi
+
+      - name: Log in to Docker Hub
+        if: steps.dockerhub.outputs.enabled == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ steps.dockerhub.outputs.username }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Prepare image tags
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          CHANNEL: ${{ needs.version.outputs.channel }}
+          MAJOR_MINOR: ${{ needs.version.outputs.major_minor }}
+          MAJOR: ${{ needs.version.outputs.major }}
+          DOCKERHUB: ${{ steps.dockerhub.outputs.enabled }}
+          DOCKER_USER: ${{ steps.dockerhub.outputs.username }}
+        run: |
+          set -euo pipefail
+          GHCR_IMAGE="ghcr.io/${GITHUB_REPOSITORY}"
+          DH_IMAGE="${DOCKER_USER}/transmission-wireguard"
+          SHORT_SHA="$(git rev-parse --short=12 HEAD)"
+          if [ "${CHANNEL}" = "release" ]; then
+            TAGS=(
+              "${GHCR_IMAGE}:${VERSION}"
+              "${GHCR_IMAGE}:v${VERSION}"
+              "${GHCR_IMAGE}:${MAJOR_MINOR}"
+              "${GHCR_IMAGE}:${MAJOR}"
+              "${GHCR_IMAGE}:latest"
+            )
+            if [ "${DOCKERHUB}" = "true" ]; then
+              TAGS+=(
+                "${DH_IMAGE}:${VERSION}"
+                "${DH_IMAGE}:v${VERSION}"
+                "${DH_IMAGE}:${MAJOR_MINOR}"
+                "${DH_IMAGE}:${MAJOR}"
+                "${DH_IMAGE}:latest"
+              )
+            fi
+          else
+            TAGS=(
+              "${GHCR_IMAGE}:edge"
+              "${GHCR_IMAGE}:sha-${SHORT_SHA}"
+            )
+            if [ "${DOCKERHUB}" = "true" ]; then
+              TAGS+=(
+                "${DH_IMAGE}:edge"
+                "${DH_IMAGE}:sha-${SHORT_SHA}"
+              )
+            fi
+          fi
+          printf -v TAG_ARGS ' --tag %s' "${TAGS[@]}"
+          echo "TAG_ARGS=${TAG_ARGS}" >> "$GITHUB_ENV"
+          echo "IMAGE=${GHCR_IMAGE}:${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build and push multi-arch image
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --build-arg SUPERVISOR_VERSION="${VERSION}" \
+            --platform "${PLATFORMS}" \
+            --cache-from type=gha,scope=linux-amd64 \
+            --cache-from type=gha,scope=linux-arm64 \
+            --cache-from type=gha,scope=linux-arm-v7 \
+            --cache-to type=gha,scope=publish,mode=max \
+            --provenance=true \
+            --sbom=true \
+            ${TAG_ARGS} \
+            --push \
+            .
+
+      - name: Run arm binaries under QEMU
+        run: |
+          set -euo pipefail
+          for platform in linux/arm64 linux/arm/v7; do
+            docker pull --platform "${platform}" "${IMAGE}"
+            docker run --rm --platform "${platform}" "${IMAGE}" version
+          done
+
+      - name: Update Docker Hub description
+        if: steps.dockerhub.outputs.enabled == 'true'
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ steps.dockerhub.outputs.username }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+          repository: ${{ steps.dockerhub.outputs.username }}/transmission-wireguard

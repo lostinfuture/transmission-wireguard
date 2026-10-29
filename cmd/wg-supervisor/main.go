@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/lostinfuture/transmission-wireguard/internal/firewall"
 	"github.com/lostinfuture/transmission-wireguard/internal/supervisor"
 )
 
@@ -37,9 +38,29 @@ func run(args, env []string) int {
 			fmt.Fprintf(os.Stderr, "%s\n", err.Error())
 			return 1
 		}
-		supervisor.NoteRustnet(cfg.Rustnet)
-		fmt.Fprintln(os.Stderr, "wireguard is not implemented")
-		return 1
+		if err := supervisor.Run(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "%s\n", err.Error())
+			return 1
+		}
+		return 0
+	case "healthcheck":
+		if err := supervisor.Healthcheck(); err != nil {
+			fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+			return 1
+		}
+		return 0
+	case "firewall-selftest":
+		if err := firewall.SelfTest(); err != nil {
+			fmt.Fprintf(os.Stderr, "firewall-selftest: %v\n", err)
+			return 1
+		}
+		return 0
+	case "drop-exec":
+		if err := dropExec(args[1:]); err != nil {
+			fmt.Fprintf(os.Stderr, "drop-exec: %v\n", err)
+			return 1
+		}
+		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", cmd)
 		return 2

@@ -42,7 +42,7 @@ selftest)
 	remote 'docker run --rm twg:dev version && docker run --rm --cap-add NET_ADMIN twg:dev firewall-selftest'
 	;;
 e2e)
-	remote 'sudo test/e2e/run.sh all'
+	remote 'sh test/e2e/run.sh all'
 	;;
 *)
 	usage

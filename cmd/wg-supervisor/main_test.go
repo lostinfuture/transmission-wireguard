@@ -10,20 +10,28 @@ import (
 	"github.com/lostinfuture/transmission-wireguard/internal/logx"
 )
 
-func TestRunStub(t *testing.T) {
+func TestRunMissingConfig(t *testing.T) {
 	_, stderr := capture(t, func() {
-		if got := run([]string{"run"}, nil); got != 1 {
+		if got := run(nil, nil); got != 1 {
 			t.Fatalf("run exit = %d, want 1", got)
 		}
 	})
-	if !strings.Contains(stderr, "wireguard is not implemented") {
+	if strings.Contains(stderr, "wireguard is not implemented") {
+		t.Fatal(stderr)
+	}
+	if !strings.Contains(stderr, "no such file") && !strings.Contains(stderr, "wireguard") {
 		t.Fatal(stderr)
 	}
 	if got := run([]string{"list-providers"}, nil); got != 2 {
 		t.Fatalf("unknown exit = %d, want 2", got)
 	}
-	if got := run(nil, nil); got != 1 {
-		t.Fatalf("default exit = %d, want 1", got)
+	_, stderr = capture(t, func() {
+		if got := run([]string{"drop-exec"}, nil); got != 1 {
+			t.Fatalf("drop-exec exit = %d", got)
+		}
+	})
+	if !strings.Contains(stderr, "--uid") {
+		t.Fatal(stderr)
 	}
 }
 
